@@ -389,38 +389,26 @@ run_gnu_shell_test() {
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
     log_verbose "Running test: $test_name"
 
-    # Run the test script with a timeout to avoid hangs on infinite loops.
-    # Output goes to a file (not a pipe) so that killing the test shell
-    # doesn't leave orphaned sed processes blocking on a pipe.
+    # Run the test script with a per-test timeout to avoid hangs.
+    # We write output to a file (not a pipe) and run timeout in the
+    # foreground so there are no orphaned processes or signal issues.
     local test_output_file="$TEST_WORK_DIR/test_output_$$"
     local test_exit_code=0
 
+    # timeout --kill-after sends SIGKILL if SIGTERM doesn't work after 5s
     PATH="$SED_WRAPPER_DIR:$PATH" \
     srcdir="$SHIM_SRCDIR" \
-    /bin/sh "$test_script" </dev/null >"$test_output_file" 2>&1 &
-    local child_pid=$!
-
-    # Watchdog: kill the test and all its children after 30s
-    ( sleep 30 && kill -- -$child_pid 2>/dev/null; kill $child_pid 2>/dev/null ) &
-    local watchdog_pid=$!
-
-    wait $child_pid 2>/dev/null
-    test_exit_code=$?
-
-    kill $watchdog_pid 2>/dev/null
-    wait $watchdog_pid 2>/dev/null
+    timeout --kill-after=5 30 \
+        /bin/sh "$test_script" </dev/null >"$test_output_file" 2>&1 \
+    || test_exit_code=$?
 
     local test_output=""
     [[ -f "$test_output_file" ]] && test_output=$(cat "$test_output_file")
     rm -f "$test_output_file"
 
-    # If killed by signal (128+N), report as timeout
-    if [[ $test_exit_code -ge 128 ]]; then
-        test_exit_code=124
-    fi
-
     # Detect timeout (exit code 124 for GNU timeout, 137 for killed)
-    if [[ $test_exit_code -eq 124 || $test_exit_code -eq 137 ]]; then
+    # 124 = GNU coreutils timeout, 125 = uutils timeout, 137 = SIGKILL
+    if [[ $test_exit_code -eq 124 || $test_exit_code -eq 125 || $test_exit_code -eq 137 ]]; then
         log_error "$test_name (timeout)"
         FAILED_TESTS=$((FAILED_TESTS + 1))
         record_result "$test_name" "FAIL" "Test timed out after 30s"
