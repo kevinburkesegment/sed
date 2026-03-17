@@ -389,35 +389,34 @@ run_gnu_shell_test() {
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
     log_verbose "Running test: $test_name"
 
-    # Run the test script with a timeout to avoid hangs on infinite loops
-    local test_output
+    # Run the test script with a timeout to avoid hangs on infinite loops.
+    # Output goes to a file (not a pipe) so that killing the test shell
+    # doesn't leave orphaned sed processes blocking on a pipe.
+    local test_output_file="$TEST_WORK_DIR/test_output_$$"
     local test_exit_code=0
-    if command -v timeout &>/dev/null; then
-        test_output=$(
-            PATH="$SED_WRAPPER_DIR:$PATH" \
-            srcdir="$SHIM_SRCDIR" \
-            timeout 30 /bin/sh "$test_script" 2>&1
-        ) || test_exit_code=$?
-    elif command -v gtimeout &>/dev/null; then
-        test_output=$(
-            PATH="$SED_WRAPPER_DIR:$PATH" \
-            srcdir="$SHIM_SRCDIR" \
-            gtimeout 30 /bin/sh "$test_script" 2>&1
-        ) || test_exit_code=$?
-    else
-        test_output=$(
-            PATH="$SED_WRAPPER_DIR:$PATH" \
-            srcdir="$SHIM_SRCDIR" \
-            /bin/sh "$test_script" 2>&1 &
-            local pid=$!
-            ( sleep 30; kill $pid 2>/dev/null ) &
-            local watchdog=$!
-            wait $pid 2>/dev/null
-            local rc=$?
-            kill $watchdog 2>/dev/null
-            wait $watchdog 2>/dev/null
-            exit $rc
-        ) || test_exit_code=$?
+
+    PATH="$SED_WRAPPER_DIR:$PATH" \
+    srcdir="$SHIM_SRCDIR" \
+    /bin/sh "$test_script" </dev/null >"$test_output_file" 2>&1 &
+    local child_pid=$!
+
+    # Watchdog: kill the test and all its children after 30s
+    ( sleep 30 && kill -- -$child_pid 2>/dev/null; kill $child_pid 2>/dev/null ) &
+    local watchdog_pid=$!
+
+    wait $child_pid 2>/dev/null
+    test_exit_code=$?
+
+    kill $watchdog_pid 2>/dev/null
+    wait $watchdog_pid 2>/dev/null
+
+    local test_output=""
+    [[ -f "$test_output_file" ]] && test_output=$(cat "$test_output_file")
+    rm -f "$test_output_file"
+
+    # If killed by signal (128+N), report as timeout
+    if [[ $test_exit_code -ge 128 ]]; then
+        test_exit_code=124
     fi
 
     # Detect timeout (exit code 124 for GNU timeout, 137 for killed)
